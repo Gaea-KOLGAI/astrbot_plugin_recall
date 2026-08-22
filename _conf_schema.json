@@ -1,0 +1,20 @@
+{
+  "trigger_words": {
+    "description": "触发撤回的关键词，用英文逗号分隔",
+    "type": "string",
+    "default": "撤回,recall,删除",
+    "hint": "管理员 @bot 后消息中包含这些关键词之一即触发撤回。"
+  },
+  "max_recall_count": {
+    "description": "一次最多撤回多少条消息",
+    "type": "int",
+    "default": 10,
+    "hint": "防止误操作一次性撤回过多。"
+  },
+  "track_count": {
+    "description": "每个会话最多追踪多少条已发送消息的 ID",
+    "type": "int",
+    "default": 50,
+    "hint": "超出此数量的旧消息 ID 会被自动丢弃。"
+  }
+}

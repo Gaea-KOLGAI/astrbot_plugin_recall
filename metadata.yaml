@@ -1,0 +1,5 @@
+name: astrbot_plugin_recall
+desc: "管理员引用 bot 的消息 + 撤回关键词，让 bot 撤回那条被引用的消息。"
+version: v0.1.0
+author: zxx624
+repo: https://github.com/zxx624/astrbot_plugin_recall
