@@ -5,6 +5,40 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
+DEFAULT_MAX_RECALL = 10
+DEFAULT_TRACK_SIZE = 50
+MAX_RECALL_LIMIT = 100
+MAX_TRACK_SIZE = 500
+
+# 带单位的写法优先（3 条 / 3个 / 3 次），其次只认紧跟触发词、最多两位的数字。
+# 这样“撤回 2026 年那条”里的年份不会被当成要撤回 2026 条。
+_COUNT_WITH_UNIT = re.compile(r"(\d{1,3})\s*(?:条|个|次)")
+_COUNT_AFTER_TRIGGER = re.compile(
+    r"(?:撤回|删除|recall|delete|del)[^\d]{0,8}(\d{1,2})(?!\d)"
+)
+
+
+def _clamp_int(value, default, minimum=1, maximum=None):
+    """把配置里的值夹到合法区间，脏值回落到默认值。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    if maximum is not None:
+        number = min(number, maximum)
+    return max(minimum, number)
+
+
+def parse_recall_count(text: "str | None", max_count: int = DEFAULT_MAX_RECALL) -> int:
+    """从消息文本解析要撤回的条数，解析不出按 1 条处理。"""
+    limit = _clamp_int(max_count, DEFAULT_MAX_RECALL, 1, MAX_RECALL_LIMIT)
+    text = (text or "").lower()
+    for pattern in (_COUNT_WITH_UNIT, _COUNT_AFTER_TRIGGER):
+        match = pattern.search(text)
+        if match:
+            return _clamp_int(match.group(1), 1, 1, limit)
+    return 1
+
 
 class RecallPlugin(Star):
     """管理员引用 bot 消息并发送撤回关键词时，直接调用 OneBot 撤回。"""
@@ -13,9 +47,13 @@ class RecallPlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self._bot = None
-        self._max_recall = int(self.config.get("max_recall_count", 10) or 10)
-        track_size = int(self.config.get("track_count", 50) or 50)
-        self._msg_tracker: dict[str, deque] = defaultdict(
+        self._max_recall = _clamp_int(
+            self.config.get("max_recall_count"), DEFAULT_MAX_RECALL, 1, MAX_RECALL_LIMIT
+        )
+        track_size = _clamp_int(
+            self.config.get("track_count"), DEFAULT_TRACK_SIZE, 1, MAX_TRACK_SIZE
+        )
+        self._msg_tracker: defaultdict[str, deque] = defaultdict(
             lambda: deque(maxlen=track_size)
         )
         words = str(self.config.get("trigger_words", "撤回,recall,删除"))
@@ -47,6 +85,7 @@ class RecallPlugin(Star):
             return
 
         original_call_action = bot.call_action
+        bot._recall_original_call_action = original_call_action
 
         async def patched_call_action(action, **params):
             result = await original_call_action(action, **params)
@@ -113,13 +152,12 @@ class RecallPlugin(Star):
         return None
 
     def _requested_count(self, text: str) -> int:
-        match = re.search(r"\d+", text)
-        if not match:
-            return 1
-        return max(1, min(int(match.group()), self._max_recall))
+        return parse_recall_count(text, self._max_recall)
 
     async def _quoted_message_is_from_bot(self, event, bot, reply) -> bool:
-        self_id = str(getattr(event.message_obj, "self_id", "") or "")
+        self_id = str(
+            getattr(event.message_obj, "self_id", "") or getattr(bot, "self_id", "") or ""
+        )
         sender_id = str(getattr(reply, "sender_id", "") or "")
         if self_id and sender_id and sender_id != "0":
             return sender_id == self_id
@@ -232,4 +270,17 @@ class RecallPlugin(Star):
         return await self._delete_ids(event, bot, list(reversed(tracked[-number:])))
 
     async def terminate(self):
-        pass
+        """插件卸载/重载时还原 bot.call_action，避免继续往已卸载实例里记录消息。"""
+        bot = self._bot
+        self._bot = None
+        if bot is None or getattr(bot, "_recall_plugin_ref", None) is not self:
+            return
+        original = getattr(bot, "_recall_original_call_action", None)
+        if original is not None and getattr(bot, "_recall_patched", False):
+            bot.call_action = original
+        for attr in ("_recall_patched", "_recall_original_call_action", "_recall_plugin_ref"):
+            try:
+                delattr(bot, attr)
+            except AttributeError:
+                pass
+        self._msg_tracker.clear()
